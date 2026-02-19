@@ -32,10 +32,15 @@ elif __file__:
     scriptDir = os.path.dirname(__file__)
 selected = 0
 selected_items = set()
+auto_push_tids = []
+auto_start_push = False
+auto_start_pull = False
+should_exit = False
 tempDir = os.path.join(scriptDir, "temp")
 zipPath = os.path.join(scriptDir, "temp.zip")
 input_text = None
 output_widget = None
+output_widget2 = None
 pressed_enter = False
 titles = []
 keys = []
@@ -215,22 +220,22 @@ class uploadZip:
                 except:
                     pass
                 return
-            if not os.path.exists('temp.zip'):
+            if not os.path.exists(zipPath):
                 response = "HTTP/1.1 404 Not Found\r\n\r\nFile not found"
                 client_socket.send(response.encode())
                 client_socket.close()
                 return
             
-            file_size = os.path.getsize('temp.zip')
+            file_size = os.path.getsize(zipPath)
             headers = (
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/zip\r\n"
-                f"Content-Disposition: attachment; filename=\"{os.path.basename('temp.zip')}\"\r\n"
+                f"Content-Disposition: attachment; filename=\"{os.path.basename(zipPath)}\"\r\n"
                 f"Content-Length: {file_size}\r\n"
                 "Connection: close\r\n\r\n"
             )
             client_socket.send(headers.encode())
-            with open('temp.zip', 'rb') as f:
+            with open(zipPath, 'rb') as f:
                 while True:
                     try:
                         data = f.read(4096)
@@ -279,7 +284,7 @@ class uploadZip:
             printToWidget2("Shutting down server\n")
             self.server_socket.close()
             printToWidget2("Deleteing temp.zip file\n")
-            os.remove(os.path.join(scriptDir, "temp.zip"))
+            os.remove(zipPath)
             printToWidget2("Deleteing temp folder\n")
             shutil.rmtree(tempDir)
             printToWidget2("Process ended successfully!\n")
@@ -458,8 +463,17 @@ def setTheme(themesel):
     dpg.bind_theme(appTheme)
 
 def createWindow():
-    global output_widget, output_widget2
+    global output_widget, output_widget2, auto_push_tids, auto_start_push, auto_start_pull
     dpg.create_context()
+
+    # Parse command-line arguments for automated push/pull mode while still using the GUI.
+    # Usage: NX-Save-Sync.exe push <TID1> <TID2> ...
+    # Usage: NX-Save-Sync.exe pull
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "push":
+        auto_push_tids = sys.argv[2:]
+        auto_start_push = True
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == "pull":
+        auto_start_pull = True
 
     with dpg.font_registry():
         if platform.system() == "Windows":
@@ -513,13 +527,13 @@ def createWindow():
         if default_font:
             dpg.bind_font(default_font)
             dpg.set_global_font_scale(0.57)
-        with dpg.tab_bar():
-            with dpg.tab(label="Send"):
+        with dpg.tab_bar(tag="main_tab_bar"):
+            with dpg.tab(label="Send", tag="send_tab"):
                 dpg.add_text("Send save file to primary switch or secondary switch")
                 dpg.add_button(label="Start server", width=150, height=30, callback=startPush, tag="start_button")
                 output_widget2 = dpg.add_input_text(multiline=True, readonly=True, width=-1, height=-1, tab_input=True)
                 dpg.hide_item(output_widget2)
-            with dpg.tab(label="Receive"):
+            with dpg.tab(label="Receive", tag="receive_tab"):
                 dpg.add_text("Receive save file from primary switch or secondary switch")
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="Connect to switch", width=150, height=30, callback=lambda: startPull(0), tag="connect_button")
@@ -582,12 +596,29 @@ def createWindow():
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.set_primary_window("Primary Window", True)
+
+    # If started with "push" arguments, automatically start the server after the first frame,
+    # using the provided title IDs instead of showing the manual selection dialog.
+    if auto_start_push and auto_push_tids:
+        dpg.set_frame_callback(1, lambda: startPush())
+    
+    # If started with "pull" argument, switch to Receive tab and automatically start pull after the first frame.
+    if auto_start_pull:
+        def auto_pull():
+            dpg.set_value("main_tab_bar", "receive_tab")
+            startPull(0)
+        dpg.set_frame_callback(1, auto_pull)
+
     dpg.start_dearpygui()
-    while dpg.is_dearpygui_running():
+    global should_exit
+    while dpg.is_dearpygui_running() and not should_exit:
         dpg.render_dearpygui_frame()
     server = uploadZip()
     server.shutdown_flag.set()
     dpg.destroy_context()
+    # Force exit if we're in CLI mode
+    if should_exit:
+        os._exit(0)
 
 def closeTitleWindow():
     global titles, keys, paths
@@ -753,12 +784,26 @@ def cleanUp():
 def printToWidget(message):
     global output_widget
     if output_widget is not None:
-        dpg.set_value(output_widget, dpg.get_value(output_widget) + message)
+        try:
+            dpg.set_value(output_widget, dpg.get_value(output_widget) + message)
+            return
+        except Exception:
+            # Fall back to console output if DearPyGui is not available
+            pass
+    # Fallback for non-GUI / CLI usage
+    print(message, end="")
 
 def printToWidget2(message):
     global output_widget2
     if output_widget2 is not None:
-        dpg.set_value(output_widget2, dpg.get_value(output_widget2) + message)
+        try:
+            dpg.set_value(output_widget2, dpg.get_value(output_widget2) + message)
+            return
+        except Exception:
+            # Fall back to console output if DearPyGui is not available
+            pass
+    # Fallback for non-GUI / CLI usage
+    print(message, end="")
 
 def checkForTemp():
     if os.path.isfile(zipPath):
@@ -796,6 +841,8 @@ def selectAllTitles():
     push()
 
 def selectTitle():
+    global titles, keys, paths, selected_items, auto_push_tids
+
     configFile = checkConfig()
     if configFile == 0:
         dpg.show_item(output_widget2)
@@ -803,6 +850,36 @@ def selectTitle():
         return 0
     with open(configFile, 'r') as file:
         config = json.load(file)
+
+    # Reset any previous selection data
+    titles = []
+    keys = []
+    paths = []
+    selected_items = set()
+
+    # If auto_push_tids is provided (CLI args), bypass the GUI selection window
+    if auto_push_tids:
+        for tid in auto_push_tids:
+            value = config.get(tid)
+            if not value or not isinstance(value, list) or len(value) < 2:
+                dpg.show_item(output_widget2)
+                printToWidget2(f"TID {tid} not found or invalid in config.json!\n")
+                continue
+            keys.append(tid)
+            paths.append(value[0])
+            titles.append(value[1])
+            selected_items.add(value[1])
+
+        if not titles:
+            dpg.show_item(output_widget2)
+            printToWidget2("No valid titles to send based on provided TIDs.\n")
+            return 0
+
+        # Directly start the push process using the pre-selected titles
+        push()
+        return 1
+
+    # Default behavior: show selection window and let the user pick titles manually
     for key, value in config.items():
         if key != "host" and isinstance(value, list) and len(value) >= 2:
             keys.append(key)
@@ -834,13 +911,21 @@ def startPush():
         printToWidget2("Process ended with an error!\n")
         
 def startPull(device):
-    global selected
+    global selected, auto_start_pull
     selected = 1
     result = pull(device)
     if (result == 0):
         printToWidget("Process ended with an error!\n")
     elif (result == 1):
         printToWidget("Process ended successfully!\n")
+        # If in CLI mode (auto_start_pull is set), exit after successful transfer
+        if auto_start_pull:
+            printToWidget("Transfer completed successfully. Exiting in 10 seconds...\n")
+            time.sleep(10.0)
+            # Stop the GUI and exit the program
+            global should_exit
+            should_exit = True
+            dpg.stop_dearpygui()
 
 def pull(device):
     global output_widget
@@ -865,9 +950,9 @@ def pull(device):
             elif device == 1:
                 printToWidget("Secondary switch IP not set!\n")
             return 0
-    if downloadZip(host, 8080, "temp.zip") == 0:
+    if downloadZip(host, 8080, zipPath) == 0:
        return 0
-    if os.path.exists(os.path.join(scriptDir, "temp.zip")):
+    if os.path.exists(zipPath):
         printToWidget("Unzipping temp.zip\n")
     else:
         printToWidget("Couldnt find temp.zip!\n")
@@ -961,22 +1046,123 @@ def push():
             shutil.copytree(paths[selectedTitle], subFolder, dirs_exist_ok=True)
         else:
             printToWidget2("Couldnt find the save data folder!\n")
-            shutil.rmtree("temp")
+            shutil.rmtree(tempDir)
             return 0
-        with zipfile.ZipFile('temp.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk('temp'):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, start='temp')
-                    zipf.write(file_path, arcname=os.path.join('temp', arcname))
     titles = []
     keys = []
     paths = []
     selected_items = set()
     printToWidget2("Zipping /temp/ folder!\n")
+    with zipfile.ZipFile(zipPath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(tempDir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, start=tempDir)
+                zipf.write(file_path, arcname=os.path.join('temp', arcname))
     server = uploadZip()
     server_thread = threading.Thread(target=server.run)
     server_thread.start()
+    
+    # If in CLI mode (auto_push_tids is set), wait for transfer to complete then exit
+    global auto_push_tids, should_exit
+    if auto_push_tids:
+        # Wait for server to complete (transfer finishes)
+        server_thread.join()
+        printToWidget2("Transfer completed successfully. Exiting in 10 seconds...\n")
+        time.sleep(10.0)
+        # Stop the GUI and exit the program
+        should_exit = True
+        dpg.stop_dearpygui()
+
+
+def cli_push(title_ids):
+    """
+    Non-interactive push mode:
+    - Uses provided title IDs to select entries from config.json
+    - Prepares temp folder and temp.zip
+    - Starts upload server and blocks until switch connects and transfer finishes
+    """
+    if not title_ids:
+        print("No title IDs specified.\n", end="")
+        return 0
+
+    configFile = checkConfig()
+    if configFile == 0:
+        print("Config file doesnt exist!\n", end="")
+        return 0
+
+    with open(configFile, 'r') as file:
+        config = json.load(file)
+
+    selected_keys = []
+    selected_paths = []
+    selected_titles = []
+    for tid in title_ids:
+        entry = config.get(tid)
+        if not entry or not isinstance(entry, list) or len(entry) < 2:
+            print(f"TID {tid} not found or invalid in config.json!\n", end="")
+            continue
+        selected_keys.append(tid)
+        selected_paths.append(entry[0])
+        selected_titles.append(entry[1])
+
+    if not selected_keys:
+        print("No valid titles to send based on provided TIDs.\n", end="")
+        return 0
+
+    # Clean any previous temp artifacts
+    checkForTemp()
+
+    try:
+        os.mkdir(tempDir)
+    except FileExistsError:
+        pass
+
+    for idx, tid in enumerate(selected_keys):
+        title_name = selected_titles[idx]
+        save_path = selected_paths[idx]
+        print(f"Selected title: {title_name}\n", end="")
+        print(f"Selected TID: {tid}\n", end="")
+        print(f"Title save data path: {save_path}\n", end="")
+
+        subFolder = os.path.join(tempDir, tid)
+        try:
+            os.mkdir(subFolder)
+        except FileExistsError:
+            pass
+
+        print("Exporting save data\n", end="")
+        if os.path.exists(save_path) and os.path.isdir(save_path):
+            shutil.copytree(save_path, subFolder, dirs_exist_ok=True)
+        else:
+            print("Couldnt find the save data folder!\n", end="")
+            # Clean up temp artifacts on error
+            try:
+                if os.path.isdir(tempDir):
+                    shutil.rmtree(tempDir)
+                if os.path.isfile(zipPath):
+                    os.remove(zipPath)
+            except Exception:
+                pass
+            return 0
+
+    print("Zipping /temp/ folder!\n", end="")
+    with zipfile.ZipFile(zipPath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(tempDir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, start=tempDir)
+                zipf.write(file_path, arcname=os.path.join('temp', arcname))
+
+    server = uploadZip()
+    # Run server - this blocks until switch connects and transfer completes
+    server.run()
+    
+    # After successful transfer, wait 10 seconds then exit
+    print("Transfer completed successfully. Exiting in 10 seconds...\n", end="")
+    time.sleep(10.0)
+    return 1
 
 if __name__ == "__main__":
+    # Always create the GUI; command-line arguments only automate selection/server start.
     createWindow()

@@ -39,6 +39,35 @@ The same procces is for syncing from secondary switch to primary switch
 
 Note: During sync between switch and pc, both devices must be on the same network.
 
+## Command Line Interface (CLI)
+
+The desktop app supports non-interactive modes for automation:
+
+### Push Mode (Send saves to Switch)
+
+```bash
+NX-Save-Sync.exe push <TID1> <TID2> ...
+```
+
+- Automatically starts the server with the specified title IDs
+- Title IDs must be configured in `config.json`
+- Exits automatically 10 seconds after successful transfer
+
+Example:
+```bash
+NX-Save-Sync.exe push 01001DC01486A000 0100BBBB00000000
+```
+
+### Pull Mode (Receive saves from Switch)
+
+```bash
+NX-Save-Sync.exe pull
+```
+
+- Automatically connects to the primary switch and downloads saves
+- Uses the switch IP configured in `config.json`
+- Exits automatically 10 seconds after successful transfer
+
 ## Screenshots
 
 <table width="100%">
